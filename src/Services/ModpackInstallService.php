@@ -19,6 +19,7 @@ use Cosmii02\ModpackManager\Models\ModpackInstall;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Throwable;
 
@@ -45,6 +46,7 @@ class ModpackInstallService
     private const BUNDLE_MAX_FILE_BYTES = 1024 * 1024;
     private const BUNDLE_PART_BYTES = 64 * 1024 * 1024;
     private const BUNDLE_DOWNLOAD_CONCURRENCY = 24;
+    private const BUNDLE_DIR = 'modpack-manager';
     private const ARCHIVE_JUNK = ['__MACOSX', '.DS_Store', 'Thumbs.db'];
     // A lone top-level folder with one of these names is pack content, not a wrapper.
     private const SERVER_ROOT_FOLDERS = [
@@ -3419,9 +3421,11 @@ SCRIPT;
         $server = $record->server;
         $uploadLimit = max(1, (int) ($server->node->upload_size ?? 100)) * 1024 * 1024;
         $partLimit = (int) min(self::BUNDLE_PART_BYTES, $uploadLimit * 0.9);
-        $tmpDir = storage_path('app/modpack-manager');
-        if (!is_dir($tmpDir) && !@mkdir($tmpDir, 0775, true) && !is_dir($tmpDir)) {
-            $record->appendLog('  Panel bundling unavailable (cannot create ' . $tmpDir . '); using per-file downloads.');
+        $disk = Storage::disk('local');
+        try {
+            $disk->makeDirectory(self::BUNDLE_DIR);
+        } catch (Throwable $e) {
+            $record->appendLog('  Panel bundling unavailable (' . $e->getMessage() . '); using per-file downloads.');
             return $files;
         }
 
@@ -3430,7 +3434,7 @@ SCRIPT;
         $lastLoggedDone = -10;
         $parts = 0;
         $zip = null;
-        $zipPath = null;
+        $zipFile = null;
         $zipBytes = 0;
         $started = microtime(true);
 
@@ -3443,10 +3447,10 @@ SCRIPT;
 
                 foreach ($chunk as $index => $file) {
                     if ($zip === null) {
-                        $zipPath = $tmpDir . '/bundle-' . $record->id . '-' . (++$parts) . '.zip';
+                        $zipFile = self::BUNDLE_DIR . '/bundle-' . $record->id . '-' . (++$parts) . '.zip';
                         $zip = new \ZipArchive();
-                        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-                            throw new RuntimeException('Could not create ' . $zipPath);
+                        if ($zip->open($disk->path($zipFile), \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+                            throw new RuntimeException('Could not create ' . $zipFile);
                         }
                     }
 
@@ -3455,7 +3459,7 @@ SCRIPT;
                     $zipBytes += strlen($bodies[$index]);
 
                     if ($zipBytes >= $partLimit) {
-                        $this->shipBundle($record, $zip, $zipPath, $parts);
+                        $this->shipBundle($record, $zip, $zipFile, $parts);
                         $zip = null;
                         $zipBytes = 0;
                     }
@@ -3466,7 +3470,7 @@ SCRIPT;
             }
 
             if ($zip !== null) {
-                $this->shipBundle($record, $zip, $zipPath, $parts);
+                $this->shipBundle($record, $zip, $zipFile, $parts);
                 $zip = null;
             }
         } catch (InstallCancelledException $e) {
@@ -3475,8 +3479,8 @@ SCRIPT;
             if ($zip !== null) {
                 $zip->close();
             }
-            if ($zipPath !== null && is_file($zipPath)) {
-                @unlink($zipPath);
+            if ($zipFile !== null) {
+                $disk->delete($zipFile);
             }
 
             // Parts already extracted are on the server; the rest are re-pulled per file.
@@ -3547,19 +3551,20 @@ SCRIPT;
         return $bodies;
     }
 
-    private function shipBundle(ModpackInstall $record, \ZipArchive $zip, string $zipPath, int $part): void
+    /** @param string $zipFile path on the local Storage disk */
+    private function shipBundle(ModpackInstall $record, \ZipArchive $zip, string $zipFile, int $part): void
     {
         if (!$zip->close()) {
-            throw new RuntimeException('Could not finalize ' . $zipPath);
+            throw new RuntimeException('Could not finalize ' . $zipFile);
         }
 
         $remoteName = '.modpack-bundle-' . $part . '.zip';
 
         try {
-            $this->uploadToWings($record->server, $zipPath, $remoteName);
+            $this->uploadToWings($record->server, $zipFile, $remoteName);
             $this->fileRepo->decompressFile('/', $remoteName);
         } finally {
-            @unlink($zipPath);
+            Storage::disk('local')->delete($zipFile);
             try {
                 $this->fileRepo->deleteFiles('/', [$remoteName]);
             } catch (Throwable) {
@@ -3567,8 +3572,8 @@ SCRIPT;
         }
     }
 
-    /** Upload a local file to the server root through Wings' signed upload endpoint. */
-    private function uploadToWings(Server $server, string $localPath, string $remoteName): void
+    /** Upload a file from the local Storage disk to the server root through Wings' signed upload endpoint. */
+    private function uploadToWings(Server $server, string $localFile, string $remoteName): void
     {
         $jwt = app(\App\Services\Nodes\NodeJWTService::class)
             ->setExpiresAt(\Carbon\CarbonImmutable::now()->addMinutes(15))
@@ -3582,7 +3587,11 @@ SCRIPT;
         // Wings rejects a reused token id, so make each upload's id unique.
         $token = $jwt->handle($server->node, $server->user->id . $server->uuid . bin2hex(random_bytes(8)));
 
-        $handle = fopen($localPath, 'r');
+        $handle = Storage::disk('local')->readStream($localFile);
+        if (!is_resource($handle)) {
+            throw new RuntimeException('Could not read ' . $localFile);
+        }
+
         try {
             Http::withOptions(['verify' => (bool) app()->environment('production')])
                 ->connectTimeout(10)

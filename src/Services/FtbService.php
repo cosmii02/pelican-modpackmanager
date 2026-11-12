@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
- * Feed the Beast (modpacks.ch) provider. No API key required.
+ * Feed the Beast provider (api.feed-the-beast.com). No API key required.
  *
  * Search returns only pack IDs, so we fan out one detail request per id (via an
  * HTTP pool) to build cards. A version's file list comes from
@@ -18,7 +18,9 @@ use RuntimeException;
  */
 class FtbService
 {
-    private const BASE_URL = 'https://api.modpacks.ch/public';
+    // The legacy api.modpacks.ch host is frozen and does not know newer packs
+    // (e.g. FTB Evolution 2 → "Modpack id not valid"); same response shapes here.
+    private const BASE_URL = 'https://api.feed-the-beast.com/v1/modpacks/public';
 
     /** Map an FTB modloader target name to a display name. */
     private const LOADER_NAMES = [
@@ -165,7 +167,7 @@ class FtbService
     /**
      * The server-installable file list + loader metadata for one version.
      *
-     * @return array{files:array<int,array{name:string,dir:string,url:?string,cfProject:?int,cfFile:?int}>, loader:?string, mc:?string, loaderVersion:?string, java:?int}
+     * @return array{files:array<int,array{name:string,dir:string,url:?string,cfProject:?int,cfFile:?int,size:?int,sha1:?string}>, loader:?string, mc:?string, loaderVersion:?string, java:?int}
      */
     public function getVersionFiles(int $packId, int $versionId): array
     {
@@ -198,6 +200,8 @@ class FtbService
                 'url'       => !empty($f['url']) ? $f['url'] : null,
                 'cfProject' => isset($f['curseforge']['project']) ? (int) $f['curseforge']['project'] : null,
                 'cfFile'    => isset($f['curseforge']['file']) ? (int) $f['curseforge']['file'] : null,
+                'size'      => isset($f['size']) ? (int) $f['size'] : null,
+                'sha1'      => !empty($f['sha1']) ? strtolower((string) $f['sha1']) : null,
             ];
         }
 
@@ -214,7 +218,11 @@ class FtbService
 
     private function normalizePack(array $pack): array
     {
-        $meta = $this->targetsMeta($pack['versions'][0]['targets'] ?? []);
+        // The API lists versions oldest first; cards should describe the newest one.
+        $versions = $pack['versions'] ?? [];
+        usort($versions, fn ($a, $b) => ($b['updated'] ?? 0) <=> ($a['updated'] ?? 0));
+        $latest = $versions[0] ?? [];
+        $meta = $this->targetsMeta($latest['targets'] ?? []);
 
         return [
             'provider'      => 'ftb',
@@ -229,7 +237,7 @@ class FtbService
             'dateModified'  => isset($pack['updated']) ? date('c', (int) $pack['updated']) : null,
             'gameVersions'  => $meta['mc'] ?? null,
             'loaders'       => $meta['loader'] ? [self::LOADER_NAMES[$meta['loader']] ?? ucfirst($meta['loader'])] : [],
-            'latestFileId'  => isset($pack['versions'][0]['id']) ? (string) $pack['versions'][0]['id'] : null,
+            'latestFileId'  => isset($latest['id']) ? (string) $latest['id'] : null,
             'websiteUrl'    => 'https://www.feed-the-beast.com/modpacks/' . rawurlencode((string) $pack['id']),
             'gallery'       => $this->galleryArt($pack['art'] ?? []),
         ];

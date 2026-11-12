@@ -42,6 +42,9 @@ class ModpackInstallService
     /** Mod files left in /mods before the new pack is placed; these are not the pack's. */
     private array $preexistingMods = [];
     private const EXTRACT_DIR = '.modpack-extract';
+    private const BUNDLE_MAX_FILE_BYTES = 1024 * 1024;
+    private const BUNDLE_PART_BYTES = 64 * 1024 * 1024;
+    private const BUNDLE_DOWNLOAD_CONCURRENCY = 24;
     private const ARCHIVE_JUNK = ['__MACOSX', '.DS_Store', 'Thumbs.db'];
     // A lone top-level folder with one of these names is pack content, not a wrapper.
     private const SERVER_ROOT_FOLDERS = [
@@ -98,6 +101,7 @@ class ModpackInstallService
                 $this->stepDownload($record, $plan['archiveUrl']);
                 $this->ensureInstallNotDismissed($record);
                 $this->stepExtract($record);
+                $plan = $this->rerouteFtbInstallerPack($record, $plan);
             } else {
                 // FTB/ATLauncher ship a file list, not a single archive.
                 $this->skipArchiveSteps($record);
@@ -330,18 +334,7 @@ class ModpackInstallService
         }
 
         if ($spec['provider'] === 'ftb') {
-            $detail = app(FtbService::class)->getVersionFiles((int) $spec['pack_id'], (int) $spec['version_id']);
-            $record->appendLog('FTB pack — assembling ' . count($detail['files']) . ' server files from the API.');
-
-            return [
-                'mode'       => 'ftb',
-                'archiveUrl' => null,
-                'files'      => $detail['files'],
-                'loader'     => $detail['loader'],
-                'mc'         => $detail['mc'],
-                'version'    => $detail['loaderVersion'],
-                'java'       => $detail['java'],
-            ];
+            return $this->ftbPlan($record, (int) $spec['pack_id'], (int) $spec['version_id']);
         }
 
         if ($spec['provider'] === 'atlauncher') {
@@ -399,6 +392,65 @@ class ModpackInstallService
 
         $record->appendLog('No official server pack available — building one from the client pack.');
         return ['mode' => 'curseforge_build', 'archiveUrl' => $cf->getDownloadUrl($modId, $fileId), 'loader' => $cfLoader, 'mc' => $cfMc, 'version' => null];
+    }
+
+    private function ftbPlan(ModpackInstall $record, int $packId, int $versionId): array
+    {
+        $detail = app(FtbService::class)->getVersionFiles($packId, $versionId);
+        $record->appendLog('FTB pack — assembling ' . count($detail['files']) . ' server files from the API.');
+
+        return [
+            'mode'       => 'ftb',
+            'archiveUrl' => null,
+            'files'      => $detail['files'],
+            'loader'     => $detail['loader'],
+            'mc'         => $detail['mc'],
+            'version'    => $detail['loaderVersion'],
+            'java'       => $detail['java'],
+        ];
+    }
+
+    /**
+     * FTB publishes its CurseForge "server pack" as a tiny zip of FTB-Server-Installer
+     * scripts (install.sh/install.bat) that fetch the real server at first run. Installed
+     * as-is, the server gets no mods; install that exact FTB version from the API instead.
+     */
+    private function rerouteFtbInstallerPack(ModpackInstall $record, array $plan): array
+    {
+        if (($plan['mode'] ?? null) !== 'server_pack') {
+            return $plan;
+        }
+
+        try {
+            $script = $this->fileRepo->getContent('/install.sh', 64 * 1024);
+        } catch (Throwable) {
+            return $plan;
+        }
+
+        if (
+            !str_contains($script, 'FTB-Server-Installer')
+            || !preg_match('/^\s*pack_id="?(\d+)"?\s*$/m', $script, $pack)
+            || !preg_match('/^\s*version_id="?(\d+)"?\s*$/m', $script, $version)
+        ) {
+            return $plan;
+        }
+
+        $record->appendLog("  This server pack is FTB's installer script (FTB pack {$pack[1]}, version {$version[1]}) — installing that version from the FTB API instead.");
+
+        foreach (['install.sh', 'install.bat'] as $file) {
+            try {
+                $this->fileRepo->deleteFiles('/', [$file]);
+            } catch (Throwable) {
+            }
+        }
+        try {
+            if (str_contains($this->fileRepo->getContent('/README.md', 64 * 1024), 'FTB Server Installer')) {
+                $this->fileRepo->deleteFiles('/', ['README.md']);
+            }
+        } catch (Throwable) {
+        }
+
+        return $this->ftbPlan($record, (int) $pack[1], (int) $version[1]);
     }
 
     // ─── Steps ──────────────────────────────────────────────────────────────
@@ -1895,16 +1947,82 @@ class ModpackInstallService
                 }
             }
 
-            $set(match ($loader) {
+            $candidates = match ($loader) {
                 'forge'    => ['FORGE_VERSION', 'BUILD_VERSION'],
                 'neoforge' => ['NEOFORGE_VERSION', 'FORGE_VERSION', 'BUILD_VERSION'],
                 default    => [],
-            }, $loaderVer);
+            };
+
+            if (($loaderVer === null || $loaderVer === '') && $loader === 'neoforge') {
+                $loaderVer = $this->latestNeoForgeForMc($mc);
+                if ($loaderVer !== null) {
+                    $record->appendLog("  Pack does not state its NeoForge version; using the newest build for Minecraft {$mc}: {$loaderVer}.");
+                }
+            }
+
+            if ($loaderVer === null || $loaderVer === '') {
+                // Never keep the previous pack's loader version: the egg prefers it over
+                // MC_VERSION, so e.g. ATM10's 21.1.x would install Minecraft 1.21.1 again.
+                foreach ($candidates as $candidate) {
+                    $variable = $egg->variables->first(fn ($v) => strtoupper((string) $v->env_variable) === $candidate);
+                    if ($variable) {
+                        ServerVariable::query()->updateOrCreate(
+                            ['server_id' => $server->id, 'variable_id' => $variable->id],
+                            ['variable_value' => (string) $variable->default_value]
+                        );
+                        $applied[$variable->env_variable] = (string) $variable->default_value;
+                        $record->appendLog("  Loader version unknown — reset {$variable->env_variable} to the egg default so it follows MC_VERSION.");
+                        break;
+                    }
+                }
+            } else {
+                $set($candidates, $loaderVer);
+            }
         }
 
         if ($applied) {
             $record->appendLog('  Set variables: ' . json_encode($applied));
         }
+    }
+
+    /**
+     * Newest NeoForge build for a Minecraft version, from NeoForge's Maven metadata.
+     * 1.x versions map to "<minor>.<patch>." (1.21.1 → 21.1.x); from 26.x on the build is
+     * prefixed by the full Minecraft version (26.1.2 → 26.1.2.x). Stable builds win over betas.
+     */
+    private function latestNeoForgeForMc(?string $mc): ?string
+    {
+        $mc = trim((string) $mc);
+        if ($mc === '' || $mc === 'latest' || $mc === '1.20.1') {
+            return null;
+        }
+
+        $prefix = str_starts_with($mc, '1.') ? substr($mc, 2) : $mc;
+        if (substr_count($prefix, '.') === 0) {
+            $prefix .= '.0';
+        }
+        $prefix .= '.';
+
+        try {
+            $xml = Cache::remember('modpack-manager:neoforge-maven-metadata', now()->addHour(), fn () => Http::timeout(15)
+                ->get('https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml')
+                ->throw()
+                ->body());
+        } catch (Throwable) {
+            return null;
+        }
+
+        preg_match_all('#<version>([^<]+)</version>#', $xml, $m);
+        $matching = array_values(array_filter($m[1] ?? [], fn (string $v) => str_starts_with($v, $prefix)));
+        if (!$matching) {
+            return null;
+        }
+
+        $stable = array_values(array_filter($matching, fn (string $v) => !preg_match('/alpha|beta|rc/i', $v)));
+        $pool = $stable ?: $matching;
+        usort($pool, 'version_compare');
+
+        return end($pool) ?: null;
     }
 
     /**
@@ -2795,6 +2913,7 @@ SCRIPT;
 
         $downloads  = [];
         $createdDirs = [];
+        $emptyFiles = [];
         foreach ($files as $f) {
             $name = $f['name'];
             $url  = $f['url'] ?? null;
@@ -2822,13 +2941,44 @@ SCRIPT;
                 $createdDirs[$remoteDir] = true;
             }
 
-            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
+            // Zero-byte placeholders (.gitkeep) cannot pass the remote download size check.
+            if (($f['size'] ?? null) === 0) {
+                $emptyFiles[] = rtrim($remoteDir, '/') . '/' . $name;
+                continue;
+            }
+
+            $downloads[] = [
+                'url'  => $url,
+                'dir'  => $remoteDir,
+                'name' => $name,
+                'size' => $f['size'] ?? null,
+                'sha1' => $f['sha1'] ?? null,
+            ];
         }
 
-        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…');
-        $this->pullFilesThrottled($record, $downloads);
+        foreach ($emptyFiles as $path) {
+            $this->fileRepo->putContent($path, '');
+        }
 
-        $note = "Installed from an FTB (modpacks.ch) pack by Modpack Manager.\n"
+        // FTB packs are mostly thousands of tiny config/datapack files. One Wings request
+        // per file (three at a time) is the bottleneck, so small files are fetched by the
+        // Panel in parallel and shipped as zip parts; large files still go Wings-direct.
+        $small = [];
+        $large = [];
+        foreach ($downloads as $download) {
+            $size = $download['size'] ?? null;
+            if (($size !== null && $size <= self::BUNDLE_MAX_FILE_BYTES) || $this->requiresPanelDownloadFallback($download['url'])) {
+                $small[] = $download;
+            } else {
+                $large[] = $download;
+            }
+        }
+
+        $record->appendLog('  Prepared ' . count($downloads) . ' file downloads (' . count($small) . ' small via Panel bundles, ' . count($large) . ' large via Wings)…');
+        $large = array_merge($this->installFilesViaBundles($record, $small), $large);
+        $this->pullFilesThrottled($record, $large);
+
+        $note = "Installed from an FTB pack by Modpack Manager.\n"
               . 'Minecraft: ' . ($plan['mc'] ?? 'unknown') . ' / loader: ' . ($plan['loader'] ?? 'unknown') . ' ' . ($plan['version'] ?? '') . "\n\n"
               . "Modpack Manager will try to switch this server to a matching loader egg and reinstall.\n";
         try { $this->fileRepo->putContent('/modpack-manager-README.txt', $note); } catch (Throwable) {}
@@ -3252,12 +3402,223 @@ SCRIPT;
         }
     }
 
+    /**
+     * Download files on the Panel in parallel, pack them into zip parts (bounded by the
+     * node's upload limit), upload each part to Wings and extract it in the server root.
+     * Returns the files that could not be bundled so the caller can pull them normally.
+     *
+     * @param array<int, array{url:string, dir:string, name:string, size:?int, sha1:?string}> $files
+     * @return array<int, array{url:string, dir:string, name:string, size:?int, sha1:?string}>
+     */
+    private function installFilesViaBundles(ModpackInstall $record, array $files): array
+    {
+        if (empty($files)) {
+            return [];
+        }
+
+        $server = $record->server;
+        $uploadLimit = max(1, (int) ($server->node->upload_size ?? 100)) * 1024 * 1024;
+        $partLimit = (int) min(self::BUNDLE_PART_BYTES, $uploadLimit * 0.9);
+        $tmpDir = storage_path('app/modpack-manager');
+        if (!is_dir($tmpDir) && !@mkdir($tmpDir, 0775, true) && !is_dir($tmpDir)) {
+            $record->appendLog('  Panel bundling unavailable (cannot create ' . $tmpDir . '); using per-file downloads.');
+            return $files;
+        }
+
+        $total = count($files);
+        $done = 0;
+        $lastLoggedDone = -10;
+        $parts = 0;
+        $zip = null;
+        $zipPath = null;
+        $zipBytes = 0;
+        $started = microtime(true);
+
+        $record->appendLog('  Bundling ' . $total . ' small file(s) on the Panel (' . self::BUNDLE_DOWNLOAD_CONCURRENCY . ' parallel downloads, ≤' . $this->humanBytes($partLimit) . ' zip parts)…');
+
+        try {
+            foreach (array_chunk($files, self::BUNDLE_DOWNLOAD_CONCURRENCY) as $chunk) {
+                $this->ensureInstallNotDismissed($record);
+                $bodies = $this->fetchBundleChunk($record, $chunk);
+
+                foreach ($chunk as $index => $file) {
+                    if ($zip === null) {
+                        $zipPath = $tmpDir . '/bundle-' . $record->id . '-' . (++$parts) . '.zip';
+                        $zip = new \ZipArchive();
+                        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+                            throw new RuntimeException('Could not create ' . $zipPath);
+                        }
+                    }
+
+                    $entry = ltrim(rtrim((string) $file['dir'], '/') . '/' . $file['name'], '/');
+                    $zip->addFromString($entry, $bodies[$index]);
+                    $zipBytes += strlen($bodies[$index]);
+
+                    if ($zipBytes >= $partLimit) {
+                        $this->shipBundle($record, $zip, $zipPath, $parts);
+                        $zip = null;
+                        $zipBytes = 0;
+                    }
+                }
+
+                $done += count($chunk);
+                $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone);
+            }
+
+            if ($zip !== null) {
+                $this->shipBundle($record, $zip, $zipPath, $parts);
+                $zip = null;
+            }
+        } catch (InstallCancelledException $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            if ($zip !== null) {
+                $zip->close();
+            }
+            if ($zipPath !== null && is_file($zipPath)) {
+                @unlink($zipPath);
+            }
+
+            // Parts already extracted are on the server; the rest are re-pulled per file.
+            $remaining = array_slice($files, $done);
+            $record->appendLog('  Panel bundling stopped (' . $e->getMessage() . '); downloading the remaining ' . count($remaining) . ' file(s) individually.');
+
+            return $remaining;
+        }
+
+        $this->reportFileDownloadProgress($record, $done, $total, $lastLoggedDone, true);
+        $record->appendLog(sprintf('  Bundled %d file(s) in %d part(s) in %.0fs.', $total, $parts, microtime(true) - $started));
+
+        return [];
+    }
+
+    /**
+     * @param array<int, array{url:string, name:string, size:?int, sha1:?string}> $chunk
+     * @return array<int, string> bodies keyed like $chunk
+     */
+    private function fetchBundleChunk(ModpackInstall $record, array $chunk): array
+    {
+        $bodies = [];
+        $pending = $chunk;
+        $errors = [];
+
+        for ($attempt = 1; $attempt <= 3 && !empty($pending); $attempt++) {
+            $responses = Http::pool(fn ($pool) => array_map(
+                fn ($index) => $pool->as((string) $index)
+                    ->withHeaders(['User-Agent' => 'pelican-modpack-manager/1.6.9'])
+                    ->connectTimeout(10)
+                    ->timeout(60)
+                    ->get((string) $pending[$index]['url']),
+                array_keys($pending)
+            ));
+
+            $retry = [];
+            foreach ($pending as $index => $file) {
+                $response = $responses[(string) $index] ?? null;
+                if (!$response instanceof \Illuminate\Http\Client\Response || !$response->successful()) {
+                    $errors[$file['name']] = $response instanceof \Illuminate\Http\Client\Response ? 'HTTP ' . $response->status() : 'request failed';
+                    $retry[$index] = $file;
+                    continue;
+                }
+
+                $body = $response->body();
+                if (!empty($file['sha1']) && sha1($body) !== $file['sha1']) {
+                    $errors[$file['name']] = 'checksum mismatch';
+                    $retry[$index] = $file;
+                    continue;
+                }
+
+                $bodies[$index] = $body;
+            }
+
+            $pending = $retry;
+            if (!empty($pending)) {
+                $this->ensureInstallNotDismissed($record);
+                usleep(500000 * $attempt);
+            }
+        }
+
+        if (!empty($pending)) {
+            $first = array_key_first($pending);
+            $name = $pending[$first]['name'];
+            throw new RuntimeException('could not download ' . count($pending) . " file(s), e.g. {$name}: " . ($errors[$name] ?? 'unknown error'));
+        }
+
+        return $bodies;
+    }
+
+    private function shipBundle(ModpackInstall $record, \ZipArchive $zip, string $zipPath, int $part): void
+    {
+        if (!$zip->close()) {
+            throw new RuntimeException('Could not finalize ' . $zipPath);
+        }
+
+        $remoteName = '.modpack-bundle-' . $part . '.zip';
+
+        try {
+            $this->uploadToWings($record->server, $zipPath, $remoteName);
+            $this->fileRepo->decompressFile('/', $remoteName);
+        } finally {
+            @unlink($zipPath);
+            try {
+                $this->fileRepo->deleteFiles('/', [$remoteName]);
+            } catch (Throwable) {
+            }
+        }
+    }
+
+    /** Upload a local file to the server root through Wings' signed upload endpoint. */
+    private function uploadToWings(Server $server, string $localPath, string $remoteName): void
+    {
+        $jwt = app(\App\Services\Nodes\NodeJWTService::class)
+            ->setExpiresAt(\Carbon\CarbonImmutable::now()->addMinutes(15))
+            ->setUser($server->user)
+            ->setClaims(['server_uuid' => $server->uuid]);
+
+        if (method_exists($jwt, 'setScopes') && enum_exists('App\\Enums\\NodeJwtScope')) {
+            $jwt->setScopes(constant('App\\Enums\\NodeJwtScope::FileUpload'));
+        }
+
+        // Wings rejects a reused token id, so make each upload's id unique.
+        $token = $jwt->handle($server->node, $server->user->id . $server->uuid . bin2hex(random_bytes(8)));
+
+        $handle = fopen($localPath, 'r');
+        try {
+            Http::withOptions(['verify' => (bool) app()->environment('production')])
+                ->connectTimeout(10)
+                ->timeout(900)
+                ->attach('files', $handle, $remoteName)
+                ->post($server->node->getConnectionAddress() . '/upload/file?' . http_build_query([
+                    'token'     => $token->toString(),
+                    'directory' => '/',
+                ]))
+                ->throw();
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+        }
+    }
+
     private function requiresPanelDownloadFallback(string $url): bool
     {
         $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
 
-        return $scheme === 'https' && $host === 'dist.modpacks.ch';
+        if ($scheme !== 'https') {
+            return false;
+        }
+
+        if ($host === 'dist.modpacks.ch') {
+            return true;
+        }
+
+        // files.feed-the-beast.com gzips text types for clients that accept it (Wings'
+        // Go client always does) and then sends no Content-Length, which Wings rejects.
+        $extension = strtolower(pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+
+        return $host === 'files.feed-the-beast.com'
+            && in_array($extension, ['json', 'txt', 'xml', 'html', 'htm', 'css', 'csv', 'svg'], true);
     }
 
     /**

@@ -2,7 +2,7 @@
     "id": "modpack-manager",
     "name": "Modpack Manager",
     "author": "cosmii02",
-    "version": "1.6.12",
+    "version": "1.6.13",
     "description": "Browse, install, and update Minecraft modpacks — plus individual mods and plugins — from CurseForge, Modrinth, FTB and ATLauncher directly from the server panel.",
     "update_url": "https://github.com/cosmii02/pelican-modpackmanager/releases/latest/download/update.json",
     "category": "plugin",

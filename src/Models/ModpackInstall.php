@@ -46,6 +46,7 @@ class ModpackInstall extends Model
         'update_available',
         'update_checked_at',
         'update_notified_version',
+        'pack_mods',
     ];
 
     protected $casts = [
@@ -54,6 +55,7 @@ class ModpackInstall extends Model
         'progress'          => 'integer',
         'update_available'  => 'boolean',
         'update_checked_at' => 'datetime',
+        'pack_mods'         => 'array',
     ];
 
     /**

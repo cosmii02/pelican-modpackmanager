@@ -38,6 +38,16 @@ use Throwable;
 class ModpackInstallService
 {
     private const ARCHIVE_NAME = 'modpack-download.zip';
+
+    /** Mod files left in /mods before the new pack is placed; these are not the pack's. */
+    private array $preexistingMods = [];
+    private const EXTRACT_DIR = '.modpack-extract';
+    private const ARCHIVE_JUNK = ['__MACOSX', '.DS_Store', 'Thumbs.db'];
+    // A lone top-level folder with one of these names is pack content, not a wrapper.
+    private const SERVER_ROOT_FOLDERS = [
+        'mods', 'config', 'overrides', 'libraries', 'plugins', 'world', 'worlds', 'kubejs',
+        'defaultconfigs', 'resourcepacks', 'datapacks', 'scripts', 'versions',
+    ];
     private const DEFAULT_REMOTE_DOWNLOAD_CONCURRENCY = 3;
     private const DEFAULT_PANEL_FALLBACK_CONCURRENCY = 4;
 
@@ -662,6 +672,8 @@ class ModpackInstallService
         }
 
         if (!($options['delete_existing'] ?? false)) {
+            $this->removePreviousPackMods($record);
+            $this->preexistingMods = $this->listModFiles() ?? [];
             $record->appendLog('Skipping directory deletion ("Delete existing files" was not enabled).');
             $record->update(['progress' => 24]);
             $record->markStepDone('delete_files');
@@ -670,10 +682,79 @@ class ModpackInstallService
 
         $record->appendLog('Clean install enabled — removing files from the previous server pack…');
         $this->cleanExistingServerRoot($record, $options);
+        $this->preexistingMods = [];
 
         $record->update(['progress' => 24]);
         $record->markStepDone('delete_files');
         $record->appendLog('Old files removed.');
+    }
+
+    /**
+     * Without a clean wipe, the new pack's mods would be merged next to the previous
+     * version's jars (e.g. FarmersDelight 1.2.10 + 1.2.11) and the loader crashes on the
+     * duplicates. Remove what the previous install placed; user-added mods are kept.
+     */
+    private function removePreviousPackMods(ModpackInstall $record): void
+    {
+        $previous = ModpackInstall::query()
+            ->where('server_id', $record->server_id)
+            ->where('id', '<', $record->id)
+            ->where('status', 'installed')
+            ->latest('id')
+            ->first();
+
+        if (!$previous) {
+            return;
+        }
+
+        $present = $this->listModFiles();
+        if ($present === null) {
+            return;
+        }
+
+        if (is_array($previous->pack_mods)) {
+            $stale = array_values(array_intersect($present, $previous->pack_mods));
+        } elseif ($previous->provider === $record->provider && (string) $previous->modpack_id === (string) $record->modpack_id) {
+            $record->appendLog('  Previous install has no mod list (older plugin build) — clearing mod jars so versions cannot mix.');
+            $stale = array_values(array_filter($present, fn (string $n) => preg_match('/\.jar(\.disabled)?$/i', $n) === 1));
+        } else {
+            return;
+        }
+
+        foreach (array_chunk($stale, 100) as $chunk) {
+            $this->fileRepo->deleteFiles('/mods', $chunk);
+        }
+
+        if ($stale) {
+            $record->appendLog('  Removed ' . count($stale) . ' mod file(s) from the previous pack version.');
+        }
+    }
+
+    private function recordPackMods(ModpackInstall $record): void
+    {
+        $mods = $this->listModFiles();
+        if ($mods === null) {
+            return;
+        }
+
+        $record->update(['pack_mods' => array_values(array_diff($mods, $this->preexistingMods))]);
+    }
+
+    /** File names directly in /mods, or null when there is no /mods folder. */
+    private function listModFiles(): ?array
+    {
+        try {
+            $names = [];
+            foreach ($this->fileRepo->getDirectory('/mods') as $entry) {
+                if (!(bool) ($entry['directory'] ?? false) && ($name = (string) ($entry['name'] ?? '')) !== '') {
+                    $names[] = $name;
+                }
+            }
+
+            return $names;
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function cleanExistingServerRoot(ModpackInstall $record, array $options): void
@@ -788,12 +869,114 @@ class ModpackInstallService
         $record->markStepRunning('extract');
         $record->appendLog('Extracting archive on the server…');
 
-        $this->fileRepo->decompressFile('/', self::ARCHIVE_NAME);
+        // Extract into a staging folder first: many server packs wrap everything in a
+        // single "<Pack> Server Files/" folder, which would otherwise land as a
+        // subdirectory while the egg installs a bare loader in the root.
+        $staging = '/' . self::EXTRACT_DIR;
+        $this->removeExtractStaging();
+        $this->fileRepo->createDirectory(self::EXTRACT_DIR, '/');
+        $this->fileRepo->renameFiles('/', [[
+            'from' => self::ARCHIVE_NAME,
+            'to'   => self::EXTRACT_DIR . '/' . self::ARCHIVE_NAME,
+        ]]);
+        $this->fileRepo->decompressFile($staging, self::ARCHIVE_NAME);
+        $this->fileRepo->deleteFiles($staging, [self::ARCHIVE_NAME]);
         $record->appendLog('  Extraction complete.');
+
+        $contentRoot = $this->locateExtractedContentRoot($staging);
+        if ($contentRoot !== $staging) {
+            $wrapper = substr($contentRoot, strlen($staging) + 1);
+            $record->appendLog("  Archive wraps the server in \"{$wrapper}/\" — moving its contents into the server root.");
+        }
+
+        $moved = $this->moveExtractedIntoRoot($contentRoot, '/');
+        $this->removeExtractStaging();
+        $record->appendLog("  Placed {$moved} top-level entr" . ($moved === 1 ? 'y' : 'ies') . ' in the server root.');
+
         $this->repairExtractedPermissions($record);
 
         $record->update(['progress' => 58]);
         $record->markStepDone('extract');
+    }
+
+    private function removeExtractStaging(): void
+    {
+        try {
+            $this->fileRepo->deleteFiles('/', [self::EXTRACT_DIR]);
+        } catch (Throwable) {
+            // Usually absent.
+        }
+    }
+
+    /** Descend through lone wrapper folders (at most three levels) to the real server root. */
+    private function locateExtractedContentRoot(string $dir): string
+    {
+        for ($depth = 0; $depth < 3; $depth++) {
+            $entries = array_values(array_filter(
+                $this->fileRepo->getDirectory($dir),
+                fn (array $e) => !in_array((string) ($e['name'] ?? ''), ['', '.', '..', ...self::ARCHIVE_JUNK], true)
+            ));
+
+            if (count($entries) !== 1 || !(bool) ($entries[0]['directory'] ?? false)) {
+                break;
+            }
+
+            $name = (string) $entries[0]['name'];
+            if (in_array(strtolower($name), self::SERVER_ROOT_FOLDERS, true)) {
+                break;
+            }
+
+            $child = rtrim($dir, '/') . '/' . $name;
+            if ($this->fileRepo->getDirectory($child) === []) {
+                break;
+            }
+
+            $dir = $child;
+        }
+
+        return $dir;
+    }
+
+    /**
+     * Move extracted entries into the target, overwriting like an in-place extraction would.
+     * Absent targets are moved with a single rename; only colliding directories are merged.
+     */
+    private function moveExtractedIntoRoot(string $sourceDir, string $targetDir): int
+    {
+        $existing = [];
+        foreach ($this->fileRepo->getDirectory($targetDir) as $entry) {
+            $existing[(string) ($entry['name'] ?? '')] = (bool) ($entry['directory'] ?? false);
+        }
+
+        $moved = 0;
+        foreach ($this->fileRepo->getDirectory($sourceDir) as $entry) {
+            $name = (string) ($entry['name'] ?? '');
+            if (in_array($name, ['', '.', '..', ...self::ARCHIVE_JUNK], true)) {
+                continue;
+            }
+
+            $sourcePath = rtrim($sourceDir, '/') . '/' . $name;
+            $targetPath = rtrim($targetDir, '/') . '/' . $name;
+            $isDirectory = (bool) ($entry['directory'] ?? false);
+
+            if (array_key_exists($name, $existing)) {
+                if ($isDirectory && $existing[$name]) {
+                    $this->moveExtractedIntoRoot($sourcePath, $targetPath);
+                    $moved++;
+                    continue;
+                }
+
+                $this->fileRepo->deleteFiles($targetDir, [$name]);
+            }
+
+            $this->fileRepo->renameFiles('/', [[
+                'from' => ltrim($sourcePath, '/'),
+                'to'   => ltrim($targetPath, '/'),
+            ]]);
+            $moved++;
+        }
+
+        return $moved;
     }
 
     /**
@@ -962,6 +1145,7 @@ class ModpackInstallService
         }
 
         $this->writeInstalledMetadata($record);
+        $this->recordPackMods($record);
 
         Cache::forget("modpack-manager:config:{$record->id}");
         Cache::forget("modpack-manager:server-properties:{$record->id}");

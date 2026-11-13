@@ -28,6 +28,8 @@
         --mpm-shadow-lg: 0 24px 60px rgba(24,22,45,.22);
         --mpm-cf:  #f16436;
         --mpm-mr:  #18bf5d;
+        --mpm-sp:  #e8a13a;
+        --mpm-hg:  #3b82f6;
         --mpm-success: #22c55e;
         --mpm-warn:    #f59e0b;
         --mpm-danger:  #ef4444;
@@ -147,11 +149,15 @@
     .mpm-pill--all .dot { background:conic-gradient(from 210deg, var(--mpm-cf), var(--mpm-mr), var(--mpm-accent), var(--mpm-cf)); box-shadow:none; }
     .mpm-pill--cf  .dot { background:var(--mpm-cf);  color:var(--mpm-cf); }
     .mpm-pill--mr  .dot { background:var(--mpm-mr);  color:var(--mpm-mr); }
+    .mpm-pill--sp  .dot { background:var(--mpm-sp);  color:var(--mpm-sp); }
+    .mpm-pill--hg  .dot { background:var(--mpm-hg);  color:var(--mpm-hg); }
     .mpm-pill.is-active { color:#fff; border-color:transparent;
         background:linear-gradient(135deg, var(--mpm-accent), color-mix(in srgb, var(--mpm-accent) 55%, var(--mpm-accent-2)));
         box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-accent) 34%, transparent); }
     .mpm-pill--cf.is-active { background:linear-gradient(135deg, var(--mpm-cf), #c8471f); box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-cf) 40%, transparent); }
     .mpm-pill--mr.is-active { background:linear-gradient(135deg, var(--mpm-mr), #0f9c48); box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-mr) 40%, transparent); }
+    .mpm-pill--sp.is-active { background:linear-gradient(135deg, var(--mpm-sp), #b8761c); box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-sp) 40%, transparent); }
+    .mpm-pill--hg.is-active { background:linear-gradient(135deg, var(--mpm-hg), #1d4ed8); box-shadow:0 6px 18px color-mix(in srgb, var(--mpm-hg) 40%, transparent); }
     .mpm-pill.is-active .dot { background:rgba(255,255,255,.9); box-shadow:none; }
 
     .mpm-filterbtn { position:relative; display:inline-flex; align-items:center; gap:8px; margin-left:auto; padding:8px 15px; border-radius:12px; cursor:pointer;
@@ -401,6 +407,17 @@
     $nounPl    = $isPlugins ? 'plugins' : 'mods';
     $Noun      = ucfirst($noun);
     $NounPl    = ucfirst($nounPl);
+    $sourceMeta = [
+        'curseforge' => ['label' => 'CurseForge', 'pill' => 'cf', 'color' => 'var(--mpm-cf)'],
+        'modrinth'   => ['label' => 'Modrinth',   'pill' => 'mr', 'color' => 'var(--mpm-mr)'],
+        'spigot'     => ['label' => 'SpigotMC',   'pill' => 'sp', 'color' => 'var(--mpm-sp)'],
+        'hangar'     => ['label' => 'Hangar',     'pill' => 'hg', 'color' => 'var(--mpm-hg)'],
+    ];
+    $sources = $this->providersForMode();
+    $sourceNames = array_map(fn ($s) => $sourceMeta[$s]['label'], $sources);
+    $sourceList = count($sourceNames) > 1
+        ? implode(', ', array_slice($sourceNames, 0, -1)) . ' & ' . end($sourceNames)
+        : implode('', $sourceNames);
 @endphp
 <div class="mpm-shell">
 
@@ -444,7 +461,7 @@
         <h1 class="mpm-hero__title">Add {{ $nounPl }} to your server</h1>
         <p class="mpm-hero__sub">
             This server looks like a <b>{{ $isPlugins ? 'plugin platform' : 'modded' }}</b> server, so we install into <code>{{ $this->getTargetDirLabel() }}</code>.
-            Search CurseForge &amp; Modrinth, pick a version, and we drop the jar straight in. Wrong guess? Switch above.
+            Search {{ $sourceList }}, pick a version, and we drop the jar straight in. Wrong guess? Switch above.
         </p>
 
         <div class="mpm-omni">
@@ -463,8 +480,9 @@
 
         <div class="mpm-pills">
             <button type="button" wire:click="setProvider('all')" class="mpm-pill mpm-pill--all {{ $provider === 'all' ? 'is-active' : '' }}"><span class="dot"></span> All sources</button>
-            <button type="button" wire:click="setProvider('curseforge')" class="mpm-pill mpm-pill--cf {{ $provider === 'curseforge' ? 'is-active' : '' }}"><span class="dot"></span> CurseForge</button>
-            <button type="button" wire:click="setProvider('modrinth')" class="mpm-pill mpm-pill--mr {{ $provider === 'modrinth' ? 'is-active' : '' }}"><span class="dot"></span> Modrinth</button>
+            @foreach($sources as $src)
+                <button type="button" wire:click="setProvider('{{ $src }}')" class="mpm-pill mpm-pill--{{ $sourceMeta[$src]['pill'] }} {{ $provider === $src ? 'is-active' : '' }}"><span class="dot"></span> {{ $sourceMeta[$src]['label'] }}</button>
+            @endforeach
 
             @php $activeFilters = $this->getActiveFilterCount(); @endphp
             <button type="button" class="mpm-filterbtn {{ $activeFilters ? 'is-on' : '' }}" @click="filtersOpen = !filtersOpen" :class="{ 'is-open': filtersOpen }">
@@ -500,7 +518,7 @@
                         @endforeach
                     </div>
                     @if($isPlugins && $provider !== 'modrinth')
-                        <p class="mpm-filter-note">CurseForge does not expose Paper/Purpur/etc. as a searchable plugin-platform facet. In All Sources those platform choices narrow Modrinth results while CurseForge remains filtered by the Minecraft version selected above.</p>
+                        <p class="mpm-filter-note">Only Modrinth filters by exact platform. CurseForge ignores the platform and filters by Minecraft version only. SpigotMC is shown when Bukkit, Spigot, Paper or Purpur is picked, and is not filtered by Minecraft version (its tested versions are shown on each card). Hangar is shown for Paper, Purpur or Folia (Folia alone limits it to Folia-ready projects).</p>
                     @endif
                 </div>
                 @if(!$isPlugins)
@@ -618,7 +636,7 @@
         <div class="mpm-provider-warning mpm-rise">
             <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
             <div>
-                <b>Some sources could not be reached.</b> Results from the other provider are still shown.
+                <b>Some sources could not be reached.</b> Results from the other sources are still shown.
                 <div style="margin-top:3px;opacity:.9;">{{ implode(' ', array_values($providerErrors)) }}</div>
             </div>
             <button type="button" wire:click="retryProviderSearches">Retry</button>
@@ -652,8 +670,8 @@
                     $dl = (int) ($item['downloadCount'] ?? 0);
                     $dlFmt = $dl >= 1000000 ? round($dl/1000000,1).'M' : ($dl >= 1000 ? round($dl/1000).'K' : $dl);
                     $pv = $item['provider'] ?? '';
-                    $pvLabel = ['curseforge'=>'CurseForge','modrinth'=>'Modrinth'][$pv] ?? ucfirst($pv);
-                    $pvColor = ['curseforge'=>'var(--mpm-cf)','modrinth'=>'var(--mpm-mr)'][$pv] ?? '#8b8aa3';
+                    $pvLabel = $sourceMeta[$pv]['label'] ?? ucfirst($pv);
+                    $pvColor = $sourceMeta[$pv]['color'] ?? '#8b8aa3';
                     $siteUrl = $this->itemWebsiteUrl($item);
                     $galleryCount = count($item['gallery'] ?? []);
                 @endphp
@@ -680,6 +698,9 @@
                                 }; @endphp
                                 <span class="mpm-chip" style="--c:{{ $lc }};">{{ $loader }}</span>
                             @endforeach
+                            @if(($item['installable'] ?? true) === false)
+                                <span class="mpm-chip" style="--c:var(--mpm-warn);" title="SpigotMC only offers this file through a browser — open its page to download it.">Browser download</span>
+                            @endif
                         </div>
                         @if(!empty($item['summary']))
                             <p class="mpm-row__desc">{{ $item['summary'] }}</p>
@@ -797,7 +818,10 @@
                                 Loading versions…
                             </div>
                         @elseif(empty($versions))
-                            <p style="color:var(--mpm-danger);font-size:.85rem;margin:0;">No compatible versions available.</p>
+                            <p style="color:var(--mpm-danger);font-size:.85rem;margin:0;">{{ $versionsNote !== '' ? $versionsNote : 'No compatible versions available.' }}</p>
+                            @if($versionsNote !== '' && ($noteUrl = $this->itemWebsiteUrl($selectedItem)))
+                                <a href="{{ $noteUrl }}" target="_blank" rel="noopener noreferrer" class="mpm-btn mpm-btn--ghost" style="margin-top:12px;">Open {{ $noun }} page</a>
+                            @endif
                         @else
                             @php $mcMap = $this->versionMcMap(); @endphp
                             <div class="mpm-select-wrap">

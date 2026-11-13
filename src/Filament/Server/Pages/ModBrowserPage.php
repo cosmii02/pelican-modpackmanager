@@ -7,7 +7,9 @@ use App\Models\Server;
 use App\Models\ServerVariable;
 use App\Repositories\Daemon\DaemonFileRepository;
 use Cosmii02\ModpackManager\Services\CurseForgeService;
+use Cosmii02\ModpackManager\Services\HangarService;
 use Cosmii02\ModpackManager\Services\ModrinthService;
+use Cosmii02\ModpackManager\Services\SpigetService;
 use Filament\Facades\Filament;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
@@ -63,7 +65,7 @@ class ModBrowserPage extends Page
     public string $mode = 'mods';
 
     public string $search   = '';
-    public string $provider = 'all';    // 'all' | 'curseforge' | 'modrinth'
+    public string $provider = 'all';    // 'all' or one of providersForMode()
 
     // Facet filters.
     public string $filterVersion = '';
@@ -92,6 +94,7 @@ class ModBrowserPage extends Page
     public array   $versions         = [];
     public bool    $versionsLoading  = false;
     public ?string $selectedVersion  = null;
+    public string  $versionsNote     = '';
 
     // Installed-files list (jars in the target folder)
     /** @var array<int, array{name:string, sizeLabel:string}> */
@@ -100,7 +103,13 @@ class ModBrowserPage extends Page
     // Whether the current user may install/remove (drives the UI; enforced server-side too).
     public bool $canManage = false;
 
-    private const COMBINED_PROVIDERS = ['curseforge', 'modrinth'];
+    private const MOD_PROVIDERS    = ['curseforge', 'modrinth'];
+    private const PLUGIN_PROVIDERS = ['curseforge', 'modrinth', 'spigot', 'hangar'];
+
+    /** Platforms that load Bukkit/Spigot plugins (SpigotMC resources). */
+    private const SPIGOT_PLATFORMS = ['bukkit', 'spigot', 'paper', 'purpur'];
+    /** Platforms that load Paper plugins (Hangar's PAPER builds). */
+    private const HANGAR_PLATFORMS = ['paper', 'purpur'];
 
     /**
      * Shared category pills for individual mods. Each key maps one friendly label
@@ -370,6 +379,12 @@ class ModBrowserPage extends Page
 
     // ─── View helpers ───────────────────────────────────────────────────────────
 
+    /** @return string[] Sources offered for the current mode. */
+    public function providersForMode(): array
+    {
+        return $this->mode === 'plugins' ? self::PLUGIN_PROVIDERS : self::MOD_PROVIDERS;
+    }
+
     /** Human label for the current mode. */
     public function contentNoun(): string
     {
@@ -556,6 +571,9 @@ class ModBrowserPage extends Page
         }
 
         $this->mode = $mode;
+        if (!in_array($this->provider, $this->providersForMode(), true)) {
+            $this->provider = 'all';
+        }
         $detectedLoader = $this->detectLoaderOrPlatform($this->getServer());
         $this->filterLoaders = $detectedLoader ? [$detectedLoader] : [];
         $this->filterCategories = [];
@@ -587,7 +605,7 @@ class ModBrowserPage extends Page
 
     public function setProvider(string $provider): void
     {
-        $this->provider = in_array($provider, ['all', 'curseforge', 'modrinth'], true) ? $provider : 'all';
+        $this->provider = in_array($provider, $this->providersForMode(), true) ? $provider : 'all';
         $this->search = '';
         $this->resetResults();
         $this->loadItems();
@@ -700,6 +718,7 @@ class ModBrowserPage extends Page
         $this->selectedItem    = $item;
         $this->versions        = [];
         $this->selectedVersion = null;
+        $this->versionsNote    = '';
         $this->versionsLoading = true;
         $this->showModal       = true;
     }
@@ -710,6 +729,7 @@ class ModBrowserPage extends Page
         $this->selectedItem    = null;
         $this->versions        = [];
         $this->selectedVersion = null;
+        $this->versionsNote    = '';
     }
 
     /**
@@ -720,6 +740,10 @@ class ModBrowserPage extends Page
      */
     private function preferredVersionId(): string
     {
+        // Pre-release channels (e.g. Hangar snapshots) only win when nothing stable exists.
+        $stable = array_values(array_filter($this->versions, fn ($v) => empty($v['prerelease'])));
+        $candidates = !empty($stable) ? $stable : $this->versions;
+
         $mc = strtolower(trim($this->filterVersion));
         $loaders = array_values(array_filter(array_map(fn ($loader) => strtolower(trim((string) $loader)), $this->filterLoaders)));
 
@@ -735,7 +759,7 @@ class ModBrowserPage extends Page
         if ($mc !== '') {
             // MC + loader.
             if (!empty($loaders)) {
-                foreach ($this->versions as $v) {
+                foreach ($candidates as $v) {
                     $t = $tags($v);
                     if (in_array($mc, $t, true) && count(array_intersect($loaders, $t)) > 0) {
                         return (string) $v['id'];
@@ -743,14 +767,14 @@ class ModBrowserPage extends Page
                 }
             }
             // MC only.
-            foreach ($this->versions as $v) {
+            foreach ($candidates as $v) {
                 if (in_array($mc, $tags($v), true)) {
                     return (string) $v['id'];
                 }
             }
         }
 
-        return (string) $this->versions[0]['id'];
+        return (string) $candidates[0]['id'];
     }
 
     /**
@@ -810,11 +834,27 @@ class ModBrowserPage extends Page
             // every Minecraft version.
             $filters = $this->activeFilters();
 
-            if (($this->selectedItem['provider'] ?? null) === 'curseforge') {
-                $this->versions = app(CurseForgeService::class)->getFiles((int) $id, $filters);
-            } else {
-                $loaders = $this->mode === 'plugins' ? self::PLUGIN_LOADERS : self::MOD_LOADERS;
-                $this->versions = app(ModrinthService::class)->getVersions((string) $id, $loaders, $filters);
+            $this->versionsNote = '';
+
+            switch ($this->selectedItem['provider'] ?? null) {
+                case 'curseforge':
+                    $this->versions = app(CurseForgeService::class)->getFiles((int) $id, $filters);
+                    break;
+                case 'spigot':
+                    $this->versions = app(SpigetService::class)->getVersions((int) $id, $filters);
+                    if (empty($this->versions)) {
+                        $this->versionsNote = 'SpigotMC only allows browser downloads for this plugin (premium, external link or non-jar file). Get it from its SpigotMC page instead.';
+                    }
+                    break;
+                case 'hangar':
+                    $this->versions = app(HangarService::class)->getVersions((string) $id, $filters);
+                    if (empty($this->versions)) {
+                        $this->versionsNote = 'This Hangar project has no Paper jar hosted on Hangar (it links to an external download). Get it from its project page instead.';
+                    }
+                    break;
+                default:
+                    $loaders = $this->mode === 'plugins' ? self::PLUGIN_LOADERS : self::MOD_LOADERS;
+                    $this->versions = app(ModrinthService::class)->getVersions((string) $id, $loaders, $filters);
             }
 
             if (!empty($this->versions)) {
@@ -1047,11 +1087,12 @@ class ModBrowserPage extends Page
 
     private function searchAllProviders(string $query, array $filters, int $page = 0): array
     {
-        $perProvider = max(1, (int) ceil($this->pageSize / count(self::COMBINED_PROVIDERS)));
+        $providers = $this->providersForMode();
+        $perProvider = max(1, (int) ceil($this->pageSize / count($providers)));
         $buckets = [];
         $hasMore = false;
 
-        foreach (self::COMBINED_PROVIDERS as $provider) {
+        foreach ($providers as $provider) {
             try {
                 $items = $this->searchProvider($provider, $query, $filters, $page, $perProvider);
                 unset($this->providerErrors[$provider]);
@@ -1084,12 +1125,20 @@ class ModBrowserPage extends Page
         return match ($provider) {
             'curseforge' => 'CurseForge',
             'modrinth' => 'Modrinth',
+            'spigot' => 'SpigotMC',
+            'hangar' => 'Hangar',
             default => ucfirst($provider),
         };
     }
 
     private function searchProvider(string $provider, string $query, array $filters, int $page = 0, int $pageSize = 20): array
     {
+        if ($provider === 'spigot' || $provider === 'hangar') {
+            return $this->mode === 'plugins'
+                ? $this->searchPluginSite($provider, $query, $filters, $page, $pageSize)
+                : [];
+        }
+
         if ($provider === 'curseforge') {
             $classId = $this->mode === 'plugins' ? CurseForgeService::CLASS_PLUGINS : CurseForgeService::CLASS_MODS;
             $filters = $this->categoryFiltersForCurseForge($filters, $classId);
@@ -1105,6 +1154,33 @@ class ModBrowserPage extends Page
             return [];
         }
         return app(ModrinthService::class)->searchByType($query, $projectType, $page, $pageSize, $filters);
+    }
+
+    /**
+     * SpigotMC and Hangar have no platform facet that matches ours, so the
+     * platform filter decides whether the site applies at all. Spiget cannot
+     * filter by Minecraft version either: Spigot's "tested versions" are
+     * author-maintained and often stale, so they are shown rather than enforced.
+     */
+    private function searchPluginSite(string $provider, string $query, array $filters, int $page, int $pageSize): array
+    {
+        $platforms = $filters['loaders'] ?? [];
+
+        if ($provider === 'spigot') {
+            if (!empty($platforms) && empty(array_intersect($platforms, self::SPIGOT_PLATFORMS))) {
+                return [];
+            }
+            return app(SpigetService::class)->search($query, $page, $pageSize);
+        }
+
+        if (!empty($platforms) && empty(array_intersect($platforms, self::HANGAR_PLATFORMS))) {
+            if (!in_array('folia', $platforms, true)) {
+                return [];
+            }
+            $filters['foliaOnly'] = true;
+        }
+
+        return app(HangarService::class)->search($query, $page, $pageSize, $filters);
     }
 
     private function categoryFiltersForModrinth(array $filters): array
@@ -1178,6 +1254,12 @@ class ModBrowserPage extends Page
         if ($provider === 'curseforge') {
             return app(CurseForgeService::class)->getMod((int) $id);
         }
+        if ($provider === 'spigot') {
+            return app(SpigetService::class)->getResource((int) $id);
+        }
+        if ($provider === 'hangar') {
+            return app(HangarService::class)->getProject((string) $id);
+        }
 
         $projectType = $this->mode === 'plugins' ? 'plugin' : 'mod';
         return app(ModrinthService::class)->getProject((string) $id, $projectType);
@@ -1204,12 +1286,17 @@ class ModBrowserPage extends Page
             return [$url, $fileName];
         }
 
-        // Modrinth: take the primary file (or the first) from the loaded version.
+        // Modrinth, SpigotMC, Hangar: take the primary file (or the first) from the loaded version.
         $version = collect($this->versions)->firstWhere('id', $this->selectedVersion);
         $files   = $version['files'] ?? [];
         $file    = collect($files)->firstWhere('primary', true) ?? ($files[0] ?? null);
+        $url     = $file['url'] ?? null;
 
-        return [$file['url'] ?? null, $file['filename'] ?? null];
+        if ($provider === 'spigot' && is_string($url)) {
+            $url = app(SpigetService::class)->resolveDownloadUrl($url);
+        }
+
+        return [$url, $file['filename'] ?? null];
     }
 
     /**

@@ -2,7 +2,7 @@
     "id": "modpack-manager",
     "name": "Modpack Manager",
     "author": "cosmii02",
-    "version": "1.6.15",
+    "version": "1.7.0",
     "description": "Browse, install, and update Minecraft modpacks — plus individual mods and plugins — from CurseForge, Modrinth, FTB and ATLauncher directly from the server panel.",
     "update_url": "https://hub.pelican.dev/plugins/modpack-manager/update.json",
     "category": "plugin",
@@ -13,5 +13,6 @@
         "server"
     ],
     "panel_version": "^1.0.0-beta36",
+    "api_version": 1,
     "composer_packages": []
 }

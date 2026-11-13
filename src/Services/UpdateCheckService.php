@@ -87,30 +87,97 @@ class UpdateCheckService
     }
 
     /**
-     * Resolve the latest available version label for a record's provider.
+     * The newest version label the installed pack can move to: same Minecraft version
+     * and loader as the installed version, and no beta/alpha unless the installed
+     * version is one. Returns the installed label when nothing newer qualifies.
      */
     public function latestVersionLabel(ModpackInstall $record): ?string
     {
         try {
-            if ($record->provider === 'curseforge') {
-                $files = app(CurseForgeService::class)->getFiles((int) $record->modpack_id);
-                return $files[0]['displayName'] ?? null;
-            }
-
             $versions = match ($record->provider) {
+                'curseforge' => app(CurseForgeService::class)->getFiles((int) $record->modpack_id),
                 'ftb'        => app(FtbService::class)->getVersions((string) $record->modpack_id),
                 'atlauncher' => app(ATLauncherService::class)->getVersions((string) $record->modpack_id),
                 default      => app(ModrinthService::class)->getVersions((string) $record->modpack_id),
             };
-
-            return $versions[0]['displayName']
-                ?? $versions[0]['versionNumber']
-                ?? $versions[0]['name']
-                ?? null;
         } catch (Throwable) {
             // Be conservative: a provider hiccup must not produce a false "update".
             return null;
         }
+
+        return $this->pickLatest(array_values($versions), trim((string) $record->modpack_version));
+    }
+
+    /** @param array<int, array<string, mixed>> $versions newest first */
+    private function pickLatest(array $versions, string $installedLabel): ?string
+    {
+        $installedIndex = null;
+        foreach ($versions as $i => $v) {
+            if ($installedLabel !== '' && $this->label($v) === $installedLabel) {
+                $installedIndex = $i;
+                break;
+            }
+        }
+
+        if ($installedIndex === null) {
+            foreach ($versions as $v) {
+                if (empty($v['prerelease'])) {
+                    return $this->label($v);
+                }
+            }
+            return isset($versions[0]) ? $this->label($versions[0]) : null;
+        }
+
+        $installed = $versions[$installedIndex];
+        $mc = $this->mcVersions($installed);
+        $loaders = $this->loaders($installed);
+        $allowPrerelease = !empty($installed['prerelease']);
+
+        // Only versions listed before the installed one are newer.
+        for ($i = 0; $i < $installedIndex; $i++) {
+            $v = $versions[$i];
+
+            if (!$allowPrerelease && !empty($v['prerelease'])) {
+                continue;
+            }
+            if (!empty($mc) && empty(array_intersect($mc, $this->mcVersions($v)))) {
+                continue;
+            }
+            $candidateLoaders = $this->loaders($v);
+            if (!empty($loaders) && !empty($candidateLoaders) && empty(array_intersect($loaders, $candidateLoaders))) {
+                continue;
+            }
+
+            return $this->label($v);
+        }
+
+        return $installedLabel;
+    }
+
+    private function label(array $v): string
+    {
+        return trim((string) ($v['displayName'] ?? $v['versionNumber'] ?? $v['name'] ?? ''));
+    }
+
+    /** @return string[] plain Minecraft versions; CurseForge mixes loader names into gameVersions */
+    private function mcVersions(array $v): array
+    {
+        return array_values(array_filter(
+            array_map(fn ($g) => trim((string) $g), (array) ($v['gameVersions'] ?? [])),
+            fn (string $g) => preg_match('/^\d+\.\d+(?:\.\d+)?$/', $g) === 1
+        ));
+    }
+
+    /** @return string[] */
+    private function loaders(array $v): array
+    {
+        $known = ['forge', 'neoforge', 'fabric', 'quilt'];
+        $tags = array_merge((array) ($v['loaders'] ?? []), (array) ($v['gameVersions'] ?? []));
+
+        return array_values(array_unique(array_filter(
+            array_map(fn ($t) => strtolower(trim((string) $t)), $tags),
+            fn (string $t) => in_array($t, $known, true)
+        )));
     }
 
     /**

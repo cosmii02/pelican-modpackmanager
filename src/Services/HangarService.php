@@ -22,7 +22,7 @@ class HangarService
     public function __construct()
     {
         $this->client = Http::withHeaders([
-            'User-Agent' => 'pelican-modpack-manager',
+            'User-Agent' => 'pelican-modpack-manager/1.7.1 (+https://github.com/cosmii02/pelican-modpackmanager)',
             'Accept'     => 'application/json',
         ])->baseUrl(self::BASE_URL)->timeout(20);
     }

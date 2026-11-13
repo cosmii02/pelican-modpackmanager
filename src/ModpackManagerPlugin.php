@@ -145,12 +145,12 @@ class ModpackManagerPlugin implements Plugin, HasPluginSettings
     {
         $values = [];
 
-        if (isset($data['curseforge_api_key'])) {
-            $values['MODPACK_MANAGER_CURSEFORGE_API_KEY'] = $data['curseforge_api_key'];
+        if (array_key_exists('curseforge_api_key', $data)) {
+            $values['MODPACK_MANAGER_CURSEFORGE_API_KEY'] = trim((string) $data['curseforge_api_key']);
         }
 
-        if (isset($data['modrinth_token'])) {
-            $values['MODPACK_MANAGER_MODRINTH_TOKEN'] = $data['modrinth_token'];
+        if (array_key_exists('modrinth_token', $data)) {
+            $values['MODPACK_MANAGER_MODRINTH_TOKEN'] = trim((string) $data['modrinth_token']);
         }
 
         if (array_key_exists('required_egg_tags', $data)) {

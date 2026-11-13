@@ -44,12 +44,17 @@ class CurseForgeService
 
     private PendingRequest $client;
 
+    public static function isConfigured(): bool
+    {
+        return !empty(config('modpack-manager.curseforge_api_key'));
+    }
+
     public function __construct()
     {
         $apiKey = config('modpack-manager.curseforge_api_key');
 
         if (empty($apiKey)) {
-            throw new RuntimeException('CurseForge API key is not configured. Please add it in Admin → Plugins → Modpack Manager.');
+            throw new RuntimeException('CurseForge API key is not configured. Please add it in Admin → Plugins → Modpack/Mod/Plugin Manager.');
         }
 
         $this->client = Http::withHeaders([
@@ -594,7 +599,11 @@ class CurseForgeService
                 }
 
                 if ($id) {
-                    $out[$id] = ['url' => $url, 'name' => $name];
+                    $out[$id] = [
+                        'url'  => $url,
+                        'name' => $name,
+                        'size' => isset($f['fileLength']) ? (int) $f['fileLength'] : null,
+                    ];
                 }
             }
         }
@@ -766,6 +775,8 @@ class CurseForgeService
             'alternateFileId'     => $file['alternateFileId'] ?? null,
             // Mix of MC versions and loader names, e.g. ["1.20.1", "NeoForge"].
             'gameVersions'        => $file['gameVersions'] ?? [],
+            // releaseType: 1 = release, 2 = beta, 3 = alpha.
+            'prerelease'          => (int) ($file['releaseType'] ?? 1) !== 1,
         ];
     }
 

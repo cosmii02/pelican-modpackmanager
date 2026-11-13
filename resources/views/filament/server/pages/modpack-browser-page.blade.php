@@ -779,7 +779,7 @@
                     @endif
                 </div>
                 @if($updateAvailable)
-                    <button type="button" wire:click="openModal('{{ $installedModpack['id'] }}', '{{ $installedModpack['provider'] ?? '' }}')" class="mpm-btn mpm-btn--update">
+                    <button type="button" wire:click="openModal(@js($installedModpack['id']), @js($installedModpack['provider'] ?? ''))" class="mpm-btn mpm-btn--update">
                         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                         Update available
                     </button>
@@ -837,7 +837,7 @@
                 <div class="mpm-active-filters">
                     @foreach($activeFilterChips as $chip)
                         <button type="button" class="mpm-active-filter"
-                                wire:click="removeFilterChip('{{ $chip['type'] }}', '{{ $chip['value'] }}')"
+                                wire:click="removeFilterChip(@js($chip['type']), @js($chip['value']))"
                                 title="Remove filter">
                             <span>{{ $chip['label'] }}</span><span class="mpm-active-filter__x">×</span>
                         </button>
@@ -866,7 +866,7 @@
                             <div class="mpm-loader-picks">
                                 @foreach($this->getFilterLoaderOptions() as $slug => $label)
                                     <button type="button"
-                                            wire:click="toggleLoader('{{ $slug }}')"
+                                            wire:click="toggleLoader(@js($slug))"
                                             class="mpm-filterchip {{ in_array($slug, $filterLoaders, true) ? 'is-active' : '' }}">
                                         <span class="dot"></span>{{ $label }}
                                     </button>
@@ -981,9 +981,9 @@
                     @endphp
                     <div class="mpm-row mpm-rise {{ $isInstalled ? 'is-installed' : '' }}" style="--row-c:{{ $pvColor }}; animation-delay: {{ min($i * 40, 320) }}ms"
                          role="button" tabindex="0"
-                         wire:click="openModal('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}')"
+                         wire:click="openModal(@js($pack['id']), @js($pack['provider'] ?? ''))"
                          wire:key="row-{{ $pv }}-{{ $pack['id'] }}"
-                         @keydown.enter="$wire.openModal('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}')">
+                         @keydown.enter="$wire.openModal(@js($pack['id']), @js($pack['provider'] ?? ''))">
                         @if($pack['iconUrl'])
                             <img src="{{ $pack['iconUrl'] }}" alt="" class="mpm-row__art">
                         @else
@@ -1024,12 +1024,12 @@
 
                         <div class="mpm-row__quick">
                             <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
-                                    wire:click.stop="openPackInfo('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}', 'description')">
+                                    wire:click.stop="openPackInfo(@js($pack['id']), @js($pack['provider'] ?? ''), 'description')">
                                 <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5m-7 7l-4-4V5a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2H8l-2 2z"/></svg>
                                 Description
                             </button>
                             <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
-                                    wire:click.stop="openPackInfo('{{ $pack['id'] }}', '{{ $pack['provider'] ?? '' }}', 'gallery')">
+                                    wire:click.stop="openPackInfo(@js($pack['id']), @js($pack['provider'] ?? ''), 'gallery')">
                                 <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
                                 Gallery{{ $galleryCount ? ' · '.$galleryCount : '' }}
                             </button>

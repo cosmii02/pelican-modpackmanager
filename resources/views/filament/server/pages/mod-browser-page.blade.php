@@ -481,7 +481,7 @@
         <div class="mpm-pills">
             <button type="button" wire:click="setProvider('all')" class="mpm-pill mpm-pill--all {{ $provider === 'all' ? 'is-active' : '' }}"><span class="dot"></span> All sources</button>
             @foreach($sources as $src)
-                <button type="button" wire:click="setProvider('{{ $src }}')" class="mpm-pill mpm-pill--{{ $sourceMeta[$src]['pill'] }} {{ $provider === $src ? 'is-active' : '' }}"><span class="dot"></span> {{ $sourceMeta[$src]['label'] }}</button>
+                <button type="button" wire:click="setProvider(@js($src))" class="mpm-pill mpm-pill--{{ $sourceMeta[$src]['pill'] }} {{ $provider === $src ? 'is-active' : '' }}"><span class="dot"></span> {{ $sourceMeta[$src]['label'] }}</button>
             @endforeach
 
             @php $activeFilters = $this->getActiveFilterCount(); @endphp
@@ -497,7 +497,7 @@
             <div class="mpm-active-filters">
                 @foreach($activeFilterChips as $chip)
                     <button type="button" class="mpm-active-filter"
-                            wire:click="removeFilterChip('{{ $chip['type'] }}', '{{ $chip['value'] }}')"
+                            wire:click="removeFilterChip(@js($chip['type']), @js($chip['value']))"
                             title="Remove filter">
                         <span>{{ $chip['label'] }}</span><span class="mpm-active-filter__x">×</span>
                     </button>
@@ -511,7 +511,7 @@
                     <label class="mpm-label">{{ $isPlugins ? 'Platforms' : 'Loaders' }} <span style="font-weight:500;color:var(--mpm-muted);">(pick more than one)</span></label>
                     <div class="mpm-loader-picks">
                         @foreach($this->getFilterLoaderOptions() as $slug => $label)
-                            <button type="button" wire:click="toggleLoader('{{ $slug }}')"
+                            <button type="button" wire:click="toggleLoader(@js($slug))"
                                     class="mpm-filterchip {{ in_array($slug, $filterLoaders, true) ? 'is-active' : '' }}">
                                 <span class="dot"></span>{{ $label }}
                             </button>
@@ -526,7 +526,7 @@
                         <label class="mpm-label">Categories <span style="font-weight:500;color:var(--mpm-muted);">(pick any)</span></label>
                         <div class="mpm-loader-picks">
                             @foreach($this->getCategoryFilterOptions() as $slug => $label)
-                                <button type="button" wire:click="toggleCategory('{{ $slug }}')"
+                                <button type="button" wire:click="toggleCategory(@js($slug))"
                                         class="mpm-filterchip {{ in_array($slug, $filterCategories, true) ? 'is-active' : '' }}">
                                     <span class="dot"></span>{{ $label }}
                                 </button>
@@ -677,9 +677,9 @@
                 @endphp
                 <div class="mpm-row mpm-rise" style="--row-c:{{ $pvColor }}; animation-delay: {{ min($i * 40, 320) }}ms"
                      role="button" tabindex="0"
-                     wire:click="openModal('{{ $item['id'] }}', '{{ $pv }}')"
+                     wire:click="openModal(@js($item['id']), @js($pv))"
                      wire:key="row-{{ $pv }}-{{ $item['id'] }}"
-                     @keydown.enter="$wire.openModal('{{ $item['id'] }}', '{{ $pv }}')">
+                     @keydown.enter="$wire.openModal(@js($item['id']), @js($pv))">
                     @if($item['iconUrl'])
                         <img src="{{ $item['iconUrl'] }}" alt="" class="mpm-row__art">
                     @else
@@ -717,12 +717,12 @@
 
                     <div class="mpm-row__quick">
                         <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
-                                wire:click.stop="openItemInfo('{{ $item['id'] }}', '{{ $pv }}', 'description')">
+                                wire:click.stop="openItemInfo(@js($item['id']), @js($pv), 'description')">
                             <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5m-7 7l-4-4V5a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2H8l-2 2z"/></svg>
                             Description
                         </button>
                         <button type="button" class="mpm-quickbtn mpm-quickbtn--grow"
-                                wire:click.stop="openItemInfo('{{ $item['id'] }}', '{{ $pv }}', 'gallery')">
+                                wire:click.stop="openItemInfo(@js($item['id']), @js($pv), 'gallery')">
                             <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
                             Gallery{{ $galleryCount ? ' · '.$galleryCount : '' }}
                         </button>

@@ -12,10 +12,12 @@ use Cosmii02\ModpackManager\Services\ATLauncherService;
 use Cosmii02\ModpackManager\Services\CurseForgeService;
 use Cosmii02\ModpackManager\Services\FtbService;
 use Cosmii02\ModpackManager\Services\ModrinthService;
+use Cosmii02\ModpackManager\Services\UpdateCheckService;
 use Filament\Facades\Filament;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Log;
+use Livewire\Attributes\Locked;
 use RuntimeException;
 use Throwable;
 
@@ -67,6 +69,7 @@ class ModpackBrowserPage extends Page
 
     /** Providers queried by the combined "all" view. */
     private const COMBINED_PROVIDERS = ['curseforge', 'modrinth', 'ftb', 'atlauncher'];
+    #[Locked]
     public array  $modpacks      = [];
     public bool   $isLoading     = false;
     public bool   $isLoadingMore = false;
@@ -78,13 +81,16 @@ class ModpackBrowserPage extends Page
 
     public bool   $showInfoModal = false;
     public string $infoMode      = 'description';
+    #[Locked]
     public ?array $infoModpack   = null;
     public string $infoError     = '';
 
     // Install modal state
     public bool    $showModal       = false;
     public bool    $showInstallConfirmation = false;
+    #[Locked]
     public ?array  $selectedModpack = null;
+    #[Locked]
     public array   $versions        = [];
     public bool    $versionsLoading = false;
     public ?string $selectedVersion = null;
@@ -93,14 +99,19 @@ class ModpackBrowserPage extends Page
     public bool    $deleteWorld       = false;
     public bool    $deleteBackups     = false;
     public array   $selectedBackupIds = [];
+    #[Locked]
     public array   $availableBackups  = [];
+    #[Locked]
     public array   $detectedWorlds    = [];
 
     // Installation progress state
     public bool   $isInstalling  = false;
+    #[Locked]
     public int    $installId     = 0;
     public int    $progress      = 0;
+    #[Locked]
     public array  $steps         = [];
+    #[Locked]
     public array  $debugLog      = [];
     public string $installStatus = '';   // 'pending' | 'installing' | 'cancelling' | 'installed' | 'failed'
     public string $installError  = '';
@@ -108,6 +119,7 @@ class ModpackBrowserPage extends Page
     public int    $installElapsed   = 0;    // frozen elapsed seconds when finished
 
     // Installed modpack info (current)
+    #[Locked]
     public ?array  $installedModpack   = null;
     public bool    $updateAvailable    = false;
     public ?string $latestVersionLabel = null;
@@ -115,13 +127,19 @@ class ModpackBrowserPage extends Page
     // Last install log viewer (browser view)
     public bool  $hasLastLog   = false;   // whether a finished install log exists to show
     public bool  $showLastLog  = false;   // drives the log modal
+    #[Locked]
     public array $lastLog      = [];      // the log lines of the most recent finished install
+    #[Locked]
     public array $lastLogMeta  = [];      // ['name', 'version', 'status', 'time']
 
     // Whether the current user may install/update (drives the UI; enforced server-side too).
+    #[Locked]
     public bool $canManage        = false;
+    #[Locked]
     public bool $canReadBackups   = false;
+    #[Locked]
     public bool $canCreateBackups = false;
+    #[Locked]
     public bool $canDeleteBackups = false;
 
     // ─── Authorization ──────────────────────────────────────────────────────────
@@ -1072,7 +1090,7 @@ class ModpackBrowserPage extends Page
             return;
         }
 
-        $record = ModpackInstall::find($this->installId);
+        $record = $this->findOwnInstall($this->installId);
 
         if (!$record) {
             return;
@@ -1147,7 +1165,7 @@ class ModpackBrowserPage extends Page
             return;
         }
 
-        $record = ModpackInstall::find($this->installId);
+        $record = $this->findOwnInstall($this->installId);
         if (!$record) {
             $this->closeInstallConsole();
             return;
@@ -1202,6 +1220,11 @@ class ModpackBrowserPage extends Page
         $this->isInstalling = true;
         $this->installStatus = 'cancelling';
         $this->installError = '';
+    }
+
+    private function findOwnInstall(int $id): ?ModpackInstall
+    {
+        return ModpackInstall::where('server_id', $this->getServer()->id)->find($id);
     }
 
     private function closeInstallConsole(): void
@@ -1439,26 +1462,7 @@ class ModpackBrowserPage extends Page
      */
     private function computeUpdateState(ModpackInstall $record): void
     {
-        $latestLabel = null;
-
-        try {
-            if ($record->provider === 'curseforge') {
-                $files = app(CurseForgeService::class)->getFiles((int) $record->modpack_id);
-                $latestLabel = $files[0]['displayName'] ?? null;
-            } else {
-                $versions = match ($record->provider) {
-                    'ftb'        => app(FtbService::class)->getVersions((string) $record->modpack_id),
-                    'atlauncher' => app(ATLauncherService::class)->getVersions((string) $record->modpack_id),
-                    default      => app(ModrinthService::class)->getVersions((string) $record->modpack_id),
-                };
-                $latestLabel = $versions[0]['displayName']
-                    ?? $versions[0]['versionNumber']
-                    ?? $versions[0]['name']
-                    ?? null;
-            }
-        } catch (Throwable) {
-            $latestLabel = null; // be conservative: no false "update available"
-        }
+        $latestLabel = app(UpdateCheckService::class)->latestVersionLabel($record);
 
         $this->latestVersionLabel = $latestLabel;
         $this->updateAvailable = $latestLabel !== null
@@ -1539,6 +1543,7 @@ class ModpackBrowserPage extends Page
         $providers = array_values(array_filter(
             self::COMBINED_PROVIDERS,
             fn (string $provider) => $this->providerSupportsFilters($provider, $filters)
+                && ($provider !== 'curseforge' || CurseForgeService::isConfigured())
         ));
 
         if (empty($providers)) {

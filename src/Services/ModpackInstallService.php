@@ -179,10 +179,24 @@ class ModpackInstallService
         }
 
         try {
+            if (!$this->isPublicHttpUrl($url)) {
+                throw new RuntimeException('artwork URL does not point to a public address');
+            }
+
             $response = Http::withHeaders([
                 'User-Agent' => 'pelican-modpack-manager/1.6.9',
                 'Accept' => 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8',
-            ])->connectTimeout(10)->timeout(30)->retry(2, 250)->get($url);
+            ])->withOptions([
+                'allow_redirects' => [
+                    'max' => 3,
+                    'protocols' => ['http', 'https'],
+                    'on_redirect' => function ($request, $response, $uri): void {
+                        if (!$this->isPublicHttpUrl((string) $uri)) {
+                            throw new RuntimeException('artwork redirect does not point to a public address');
+                        }
+                    },
+                ],
+            ])->connectTimeout(10)->timeout(30)->retry(2, 250, throw: false)->get($url);
 
             if ($response->failed()) {
                 throw new RuntimeException('image request returned HTTP ' . $response->status());
@@ -235,6 +249,45 @@ class ModpackInstallService
             ]);
             $record->appendLog('  Server icon was not changed: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * The Panel fetches pack artwork itself, so refuse anything that resolves to a
+     * private, loopback, link-local or reserved address.
+     */
+    private function isPublicHttpUrl(string $url): bool
+    {
+        if (!in_array(strtolower((string) parse_url($url, PHP_URL_SCHEME)), ['http', 'https'], true)) {
+            return false;
+        }
+
+        $host = trim((string) parse_url($url, PHP_URL_HOST), '[]');
+        if ($host === '') {
+            return false;
+        }
+
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            $ips = [$host];
+        } else {
+            $ips = gethostbynamel($host) ?: [];
+            foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $record) {
+                if (!empty($record['ipv6'])) {
+                    $ips[] = $record['ipv6'];
+                }
+            }
+        }
+
+        if (empty($ips)) {
+            return false;
+        }
+
+        foreach ($ips as $ip) {
+            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function resolveServerIconUrl(ModpackInstall $record): ?string
@@ -2820,7 +2873,7 @@ SCRIPT;
                 $createdDirs[$remoteDir] = true;
             }
 
-            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
+            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name, 'size' => $info['size'] ?? null];
             $folderCounts[$folder] = ($folderCounts[$folder] ?? 0) + 1;
         }
 
@@ -2870,7 +2923,12 @@ SCRIPT;
                 $createdDirs[$remoteDir] = true;
             }
 
-            $downloads[] = ['url' => $url, 'dir' => $remoteDir, 'name' => $name];
+            $downloads[] = [
+                'url'  => $url,
+                'dir'  => $remoteDir,
+                'name' => $name,
+                'size' => isset($f['fileSize']) ? (int) $f['fileSize'] : null,
+            ];
         }
 
         $record->appendLog('  Prepared ' . count($downloads) . ' file downloads for Wings…');
@@ -3169,6 +3227,19 @@ SCRIPT;
      */
     private function pullFilesThrottled(ModpackInstall $record, array $downloads): void
     {
+        // Wings cannot pull an empty file (its completion check needs a non-zero size),
+        // so files the source lists as zero bytes are written directly.
+        $downloads = array_values(array_filter($downloads, function (array $download): bool {
+            if (($download['size'] ?? null) !== 0) {
+                return true;
+            }
+
+            $dir = rtrim((string) $download['dir'], '/');
+            $this->fileRepo->putContent($dir . '/' . $download['name'], '');
+
+            return false;
+        }));
+
         if (empty($downloads)) {
             return;
         }
@@ -3740,58 +3811,6 @@ SCRIPT;
                 'Could not download FTB-hosted file “' . $name . '” using the parallel Panel fallback: ' . $lastError
             );
         }
-    }
-
-    /**
-     * @param array{url:string, dir:string, name:string} $file
-     */
-    private function downloadFileViaPanelFallback(ModpackInstall $record, array $file): void
-    {
-        $url = (string) $file['url'];
-        $name = (string) $file['name'];
-        $dir = '/' . trim((string) $file['dir'], '/');
-        if ($dir === '/') {
-            $path = '/' . $name;
-        } else {
-            $path = rtrim($dir, '/') . '/' . $name;
-        }
-
-        $lastError = 'unknown error';
-
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
-            try {
-                $lastCancelCheck = 0.0;
-                $response = Http::withHeaders([
-                    'User-Agent' => 'pelican-modpack-manager/1.6.9',
-                ])->withOptions([
-                    'progress' => function () use ($record, &$lastCancelCheck): void {
-                        $now = microtime(true);
-                        if (($now - $lastCancelCheck) >= 0.5) {
-                            $lastCancelCheck = $now;
-                            $this->ensureInstallNotDismissed($record);
-                        }
-                    },
-                ])->connectTimeout(10)->timeout(60)->get($url);
-
-                if (!$response->successful()) {
-                    $lastError = 'HTTP ' . $response->status();
-                } else {
-                    $this->fileRepo->putContent($path, $response->body());
-                    return;
-                }
-            } catch (Throwable $e) {
-                $lastError = $e->getMessage();
-            }
-
-            if ($attempt < 3) {
-                $this->ensureInstallNotDismissed($record);
-                usleep(500000);
-            }
-        }
-
-        throw new RuntimeException(
-            'Could not download FTB-hosted file “' . $name . '” using the Panel fallback: ' . $lastError
-        );
     }
 
     private function reportFileDownloadProgress(

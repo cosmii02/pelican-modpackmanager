@@ -14,6 +14,7 @@ use Filament\Facades\Filament;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Log;
+use Livewire\Attributes\Locked;
 use Throwable;
 
 /**
@@ -62,6 +63,7 @@ class ModBrowserPage extends Page
     // ─── State ────────────────────────────────────────────────────────────────
 
     /** 'mods' | 'plugins' — detected from the egg, user-overridable. */
+    #[Locked]
     public string $mode = 'mods';
 
     public string $search   = '';
@@ -73,6 +75,7 @@ class ModBrowserPage extends Page
     public array  $filterCategories = [];
 
     /** @var array<int, array<string, mixed>> */
+    #[Locked]
     public array  $items          = [];
     public bool   $isLoading      = false;
     public bool   $isLoadingMore  = false;
@@ -84,13 +87,16 @@ class ModBrowserPage extends Page
 
     // Description/gallery modal state
     public bool    $showInfoModal = false;
+    #[Locked]
     public ?array  $infoItem      = null;
     public string  $infoMode      = 'description';
     public string  $infoError     = '';
 
     // Install drawer state
     public bool    $showModal        = false;
+    #[Locked]
     public ?array  $selectedItem     = null;
+    #[Locked]
     public array   $versions         = [];
     public bool    $versionsLoading  = false;
     public ?string $selectedVersion  = null;
@@ -98,9 +104,11 @@ class ModBrowserPage extends Page
 
     // Installed-files list (jars in the target folder)
     /** @var array<int, array{name:string, sizeLabel:string}> */
+    #[Locked]
     public array $installedFiles = [];
 
     // Whether the current user may install/remove (drives the UI; enforced server-side too).
+    #[Locked]
     public bool $canManage = false;
 
     private const MOD_PROVIDERS    = ['curseforge', 'modrinth'];
@@ -271,10 +279,12 @@ class ModBrowserPage extends Page
         $egg  = $server->egg;
         $envs = $this->eggEnvVars($egg);
 
-        if (in_array('NEOFORGE_VERSION', $envs, true)) return 'neoforge';
-        if (in_array('FORGE_VERSION', $envs, true))    return 'forge';
-        if (in_array('QUILT_VERSION', $envs, true))    return 'quilt';
-        if (in_array('FABRIC_VERSION', $envs, true))   return 'fabric';
+        if ($this->mode !== 'plugins') {
+            if (in_array('NEOFORGE_VERSION', $envs, true)) return 'neoforge';
+            if (in_array('FORGE_VERSION', $envs, true))    return 'forge';
+            if (in_array('QUILT_VERSION', $envs, true))    return 'quilt';
+            if (in_array('FABRIC_VERSION', $envs, true))   return 'fabric';
+        }
 
         $haystack   = $this->eggHaystack($egg);
         $candidates = $this->mode === 'plugins'
@@ -1087,7 +1097,12 @@ class ModBrowserPage extends Page
 
     private function searchAllProviders(string $query, array $filters, int $page = 0): array
     {
-        $providers = $this->providersForMode();
+        // Without an API key CurseForge is simply left out of the combined view
+        // rather than reported as an outage on every search.
+        $providers = array_values(array_filter(
+            $this->providersForMode(),
+            fn (string $provider) => $provider !== 'curseforge' || CurseForgeService::isConfigured()
+        ));
         $perProvider = max(1, (int) ceil($this->pageSize / count($providers)));
         $buckets = [];
         $hasMore = false;

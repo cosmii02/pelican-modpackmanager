@@ -160,6 +160,7 @@ class FtbService
                 'datePublished' => isset($v['updated']) ? date('c', (int) $v['updated']) : null,
                 'loaders'       => $meta['loader'] ? [self::LOADER_NAMES[$meta['loader']] ?? ucfirst($meta['loader'])] : [],
                 'gameVersions'  => $meta['mc'] ?? '',
+                'prerelease'    => strtolower((string) ($v['type'] ?? 'release')) !== 'release',
             ];
         }, $versions));
     }

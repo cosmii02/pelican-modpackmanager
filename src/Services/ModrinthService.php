@@ -18,7 +18,7 @@ class ModrinthService
     public function __construct()
     {
         $headers = [
-            'User-Agent' => 'pelican-modpack-manager/1.0.0 (contact@example.com)',
+            'User-Agent' => 'pelican-modpack-manager/1.7.1 (+https://github.com/cosmii02/pelican-modpackmanager)',
             'Accept'     => 'application/json',
         ];
 
@@ -283,6 +283,7 @@ class ModrinthService
             'loaders'      => $v['loaders'] ?? [],
             'gameVersions' => $v['game_versions'] ?? [],
             'downloads'    => $v['downloads'] ?? 0,
+            'prerelease'   => ($v['version_type'] ?? 'release') !== 'release',
             'files'        => array_map(fn (array $f) => [
                 'url'      => $f['url'],
                 'filename' => $f['filename'],

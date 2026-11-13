@@ -30,7 +30,7 @@ class SpigetService
     public function __construct()
     {
         $this->client = Http::withHeaders([
-            'User-Agent' => 'pelican-modpack-manager',
+            'User-Agent' => 'pelican-modpack-manager/1.7.1 (+https://github.com/cosmii02/pelican-modpackmanager)',
             'Accept'     => 'application/json',
         ])->baseUrl(self::BASE_URL)->timeout(20);
     }
@@ -155,7 +155,7 @@ class SpigetService
         }
 
         try {
-            $response = Http::withHeaders(['User-Agent' => 'pelican-modpack-manager'])
+            $response = Http::withHeaders(['User-Agent' => 'pelican-modpack-manager/1.7.1 (+https://github.com/cosmii02/pelican-modpackmanager)'])
                 ->withoutRedirecting()
                 ->timeout(20)
                 ->get($url);
@@ -247,7 +247,7 @@ class SpigetService
         try {
             $responses = Http::pool(fn (Pool $pool) => array_map(
                 fn (int $id) => $pool->as((string) $id)
-                    ->withHeaders(['User-Agent' => 'pelican-modpack-manager', 'Accept' => 'application/json'])
+                    ->withHeaders(['User-Agent' => 'pelican-modpack-manager/1.7.1 (+https://github.com/cosmii02/pelican-modpackmanager)', 'Accept' => 'application/json'])
                     ->timeout(10)
                     ->get(self::BASE_URL . "/authors/{$id}", ['fields' => 'id,name']),
                 $missing

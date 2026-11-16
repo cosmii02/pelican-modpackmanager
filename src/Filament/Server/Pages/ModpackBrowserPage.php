@@ -1127,6 +1127,7 @@ class ModpackBrowserPage extends Page
 
         if (in_array($record->status, ['installed', 'failed'], true)) {
             $this->isInstalling = false;
+            $this->hasLastLog   = true;
             $this->installElapsed = $record->created_at
                 ? (int) $record->created_at->diffInSeconds($record->updated_at ?? now())
                 : 0;

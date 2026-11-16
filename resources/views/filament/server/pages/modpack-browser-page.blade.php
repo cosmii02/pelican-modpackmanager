@@ -626,7 +626,7 @@
 <div class="mpm-shell">
 
     {{-- ══════════════ INSTALL CONSOLE (progress) ══════════════ --}}
-    @if ($isInstalling || in_array($installStatus, ['installing', 'cancelling', 'failed']))
+    @if ($isInstalling || in_array($installStatus, ['installing', 'cancelling', 'failed', 'installed']))
 
         <div wire:poll.2000ms="pollProgress"></div>
 
@@ -742,17 +742,18 @@
 
             {{-- Actions --}}
             <div class="mpm-console__foot">
+                {{-- Distinct keys stop Livewire morphing "Cancel install" into these buttons and keeping its wire:confirm. --}}
                 @if($installStatus === 'installed')
-                    <button type="button" wire:click="cancelInstallView" class="mpm-btn mpm-btn--success">
+                    <button type="button" wire:key="console-done" wire:click="cancelInstallView" class="mpm-btn mpm-btn--success">
                         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg> Done
                     </button>
                 @elseif($installStatus === 'failed')
-                    <button type="button" wire:click="cancelInstallView" class="mpm-btn mpm-btn--ghost">Back to library</button>
+                    <button type="button" wire:key="console-back" wire:click="cancelInstallView" class="mpm-btn mpm-btn--ghost">Back to library</button>
                 @elseif($installStatus === 'cancelling')
                     <button type="button" class="mpm-btn mpm-btn--ghost" disabled style="opacity:.65; cursor:not-allowed;">Cancelling…</button>
                     <span style="font-size:.78rem; color:var(--mpm-muted);">Waiting for the running queue job to stop. The library will not unlock early and trap the next install behind it.</span>
                 @else
-                    <button type="button" wire:click="cancelInstallView"
+                    <button type="button" wire:key="console-cancel" wire:click="cancelInstallView"
                             wire:confirm="Cancel this installation? If it is already running, this screen will stay here until the queue worker has actually stopped it."
                             class="mpm-btn mpm-btn--ghost">
                         Cancel install

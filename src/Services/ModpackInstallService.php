@@ -8,7 +8,6 @@ use App\Models\Egg;
 use App\Models\EggVariable;
 use App\Models\Server;
 use App\Models\ServerVariable;
-use App\Repositories\Daemon\DaemonFileRepository;
 use App\Services\Backups\DeleteBackupService;
 use App\Services\Backups\InitiateBackupService;
 use App\Services\Eggs\EggChangerService;
@@ -16,6 +15,7 @@ use App\Services\Eggs\Sharing\EggImporterService;
 use App\Services\Servers\ReinstallServerService;
 use Cosmii02\ModpackManager\Exceptions\InstallCancelledException;
 use Cosmii02\ModpackManager\Models\ModpackInstall;
+use Cosmii02\ModpackManager\Repositories\RetryingDaemonFileRepository;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -57,7 +57,7 @@ class ModpackInstallService
     private const DEFAULT_PANEL_FALLBACK_CONCURRENCY = 4;
 
     public function __construct(
-        private DaemonFileRepository $fileRepo
+        private RetryingDaemonFileRepository $fileRepo
     ) {}
 
     public function install(ModpackInstall $record, array $options = [], array $spec = []): void
@@ -1047,8 +1047,13 @@ class ModpackInstallService
     /**
      * Move extracted entries into the target, overwriting like an in-place extraction would.
      * Absent targets are moved with a single rename; only colliding directories are merged.
+     * Deletes and renames are batched per directory: an update of a large pack collides on
+     * thousands of config files, and one Wings call per file is slow and fragile.
+     *
+     * @param  string[]  $skip  names left out at this level (they stay in the source)
+     * @return int top-level entries placed
      */
-    private function moveExtractedIntoRoot(string $sourceDir, string $targetDir): int
+    private function moveExtractedIntoRoot(string $sourceDir, string $targetDir, array $skip = []): int
     {
         $existing = [];
         foreach ($this->fileRepo->getDirectory($targetDir) as $entry) {
@@ -1056,9 +1061,11 @@ class ModpackInstallService
         }
 
         $moved = 0;
+        $deletes = [];
+        $renames = [];
         foreach ($this->fileRepo->getDirectory($sourceDir) as $entry) {
             $name = (string) ($entry['name'] ?? '');
-            if (in_array($name, ['', '.', '..', ...self::ARCHIVE_JUNK], true)) {
+            if (in_array($name, ['', '.', '..', ...self::ARCHIVE_JUNK, ...$skip], true)) {
                 continue;
             }
 
@@ -1073,14 +1080,18 @@ class ModpackInstallService
                     continue;
                 }
 
-                $this->fileRepo->deleteFiles($targetDir, [$name]);
+                $deletes[] = $name;
             }
 
-            $this->fileRepo->renameFiles('/', [[
-                'from' => ltrim($sourcePath, '/'),
-                'to'   => ltrim($targetPath, '/'),
-            ]]);
+            $renames[] = ['from' => ltrim($sourcePath, '/'), 'to' => ltrim($targetPath, '/')];
             $moved++;
+        }
+
+        foreach (array_chunk($deletes, 200) as $chunk) {
+            $this->fileRepo->deleteFiles($targetDir, $chunk);
+        }
+        foreach (array_chunk($renames, 200) as $chunk) {
+            $this->fileRepo->renameFiles('/', $chunk);
         }
 
         return $moved;
@@ -3138,64 +3149,15 @@ SCRIPT;
     private function mergeOverrides(ModpackInstall $record): void
     {
         try {
-            $moved = $this->mergeRemoteDirectory('/overrides', '/');
+            $moved = $this->moveExtractedIntoRoot('/overrides', '/', config('modpack-manager.preserved_files', []));
             $this->fileRepo->deleteFiles('/', ['overrides']);
 
             if ($moved > 0) {
-                $record->appendLog('  Merged ' . $moved . ' file(s) from overrides/ into the server root.');
+                $record->appendLog('  Merged ' . $moved . ' top-level entr' . ($moved === 1 ? 'y' : 'ies') . ' from overrides/ into the server root.');
             }
         } catch (Throwable $e) {
             $record->appendLog('  Overrides merge skipped (' . $e->getMessage() . ')');
         }
-    }
-
-    private function mergeRemoteDirectory(string $sourceDir, string $targetDir): int
-    {
-        $entries = $this->fileRepo->getDirectory($sourceDir);
-        $moved = 0;
-
-        foreach ($entries as $entry) {
-            $name = (string) ($entry['name'] ?? '');
-            if ($name === '' || $name === '.' || $name === '..') {
-                continue;
-            }
-
-            if ($targetDir === '/' && in_array($name, config('modpack-manager.preserved_files', []), true)) {
-                continue;
-            }
-
-            $sourcePath = rtrim($sourceDir, '/') . '/' . $name;
-            $targetPath = rtrim($targetDir, '/') . '/' . $name;
-
-            if ((bool) ($entry['directory'] ?? false)) {
-                $this->ensureRemoteDirectory($targetDir, $name);
-                $moved += $this->mergeRemoteDirectory($sourcePath, $targetPath);
-                continue;
-            }
-
-            $this->replaceRemoteEntry($sourcePath, $targetPath);
-            $moved++;
-        }
-
-        return $moved;
-    }
-
-    private function ensureRemoteDirectory(string $parentDir, string $name): void
-    {
-        foreach ($this->fileRepo->getDirectory($parentDir) as $entry) {
-            if (($entry['name'] ?? null) !== $name) {
-                continue;
-            }
-
-            if ((bool) ($entry['directory'] ?? false)) {
-                return;
-            }
-
-            $this->fileRepo->deleteFiles($parentDir, [$name]);
-            break;
-        }
-
-        $this->fileRepo->createDirectory($name, $parentDir);
     }
 
     private function replaceRemoteEntry(string $sourcePath, string $targetPath): void
